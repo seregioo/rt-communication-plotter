@@ -128,6 +128,8 @@ def compute_metrics(trace: pd.DataFrame, target_cycle_us: float) -> pd.DataFrame
     metrics["sleep_after_receive_us"] = ns_to_us(
         metrics["time_at_begin_ns"].shift(-1) - metrics["time_after_receive_ns"]
     )
+    metrics["deadline_miss"] = metrics["end_to_end_latency_us"] > target_cycle_us
+    metrics["negative_slack"] = metrics["sleep_after_receive_us"] <= 0.0
     metrics["transmission_gap"] = metrics["x_recv"] - metrics["x_trans"]
     metrics["absolute_gap"] = metrics["transmission_gap"].abs()
     metrics["relative_gap_percent"] = (
@@ -158,9 +160,17 @@ def plot_latency(metrics: pd.DataFrame, config: AnalysisConfig) -> None:
         "end_to_end_latency_us",
     ]
     metrics[latency_columns].plot(ax=axes[0, 0], alpha=0.85)
+    axes[0, 0].axhline(
+        config.target_cycle_us,
+        color="black",
+        linestyle="--",
+        linewidth=1.2,
+        label="100 us deadline" if config.target_cycle_us == 100.0 else "Cycle deadline",
+    )
     axes[0, 0].set_title("Latency Timeline")
     axes[0, 0].set_xlabel("Sample")
     axes[0, 0].set_ylabel("Latency (us)")
+    axes[0, 0].legend()
 
     metrics[latency_columns].plot(kind="box", ax=axes[0, 1])
     axes[0, 1].set_title("Latency Distribution")
@@ -188,9 +198,17 @@ def plot_latency(metrics: pd.DataFrame, config: AnalysisConfig) -> None:
         color="tab:green",
         alpha=0.8,
     )
+    axes[1, 1].axvline(
+        config.target_cycle_us,
+        color="black",
+        linestyle="--",
+        linewidth=1.2,
+        label="100 us deadline" if config.target_cycle_us == 100.0 else "Cycle deadline",
+    )
     axes[1, 1].set_title("End-to-End Latency Histogram")
     axes[1, 1].set_xlabel("Latency (us)")
     axes[1, 1].set_ylabel("Count")
+    axes[1, 1].legend()
 
     save_figure(figure, config.output_dir / "latency_analysis.png", config.show_plots)
 
@@ -302,15 +320,29 @@ def build_summary(metrics: pd.DataFrame, config: AnalysisConfig) -> str:
     absolute_gap: pd.Series = metrics["absolute_gap"].dropna()
     jitter: pd.Series = metrics["jitter_us"].dropna()
     sleep_after_receive: pd.Series = metrics["sleep_after_receive_us"].dropna()
+    deadline_misses: int = int(metrics["deadline_miss"].fillna(False).sum())
+    negative_slack: int = int(metrics["negative_slack"].fillna(False).sum())
+    sample_count: int = len(metrics)
+    deadline_miss_rate: float = (
+        deadline_misses / sample_count * 100.0 if sample_count else 0.0
+    )
+    negative_slack_rate: float = (
+        negative_slack / sample_count * 100.0 if sample_count else 0.0
+    )
 
     return "\n".join(
         [
             "Trace analysis summary",
-            f"Samples: {len(metrics)}",
+            f"Samples: {sample_count}",
             (
                 "End-to-end latency (us): "
                 f"mean={end_to_end.mean():.3f}, p95={end_to_end.quantile(0.95):.3f}, "
                 f"max={end_to_end.max():.3f}"
+            ),
+            (
+                "Deadline misses: "
+                f"{deadline_misses}/{sample_count} ({deadline_miss_rate:.6f}%) with "
+                f"end_to_end_latency_us > {config.target_cycle_us:.3f}"
             ),
             (
                 "Cycle duration (us): "
@@ -332,6 +364,11 @@ def build_summary(metrics: pd.DataFrame, config: AnalysisConfig) -> str:
                 f"mean={sleep_after_receive.mean():.3f}, "
                 f"p95={sleep_after_receive.quantile(0.95):.3f}, "
                 f"min={sleep_after_receive.min():.3f}"
+            ),
+            (
+                "Negative slack samples: "
+                f"{negative_slack}/{sample_count} ({negative_slack_rate:.6f}%) with "
+                "sleep_after_receive_us <= 0"
             ),
             f"Plots written to: {config.output_dir}",
         ]
