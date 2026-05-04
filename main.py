@@ -17,6 +17,7 @@ class AnalysisConfig:
 
     input_csv: Path
     output_dir: Path
+    input_time_unit: str
     target_cycle_us: float
     rolling_window: int
     show_plots: bool
@@ -40,6 +41,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("plots"),
         help="Directory where generated plots will be written. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--input-time-unit",
+        choices=("ns", "us"),
+        default="ns",
+        help=(
+            "Unit used by the raw timestamp columns in the CSV. "
+            "Default: %(default)s"
+        ),
     )
     parser.add_argument(
         "--target-cycle-us",
@@ -77,6 +87,7 @@ def parse_args() -> AnalysisConfig:
     return AnalysisConfig(
         input_csv=arguments.input_csv,
         output_dir=arguments.output_dir,
+        input_time_unit=arguments.input_time_unit,
         target_cycle_us=arguments.target_cycle_us,
         rolling_window=arguments.rolling_window,
         show_plots=arguments.show_plots,
@@ -102,32 +113,42 @@ def load_trace(input_csv: Path) -> pd.DataFrame:
     return trace
 
 
-def ns_to_us(series: pd.Series) -> pd.Series:
-    """Convert a nanosecond series to microseconds."""
-    return series.astype("float64") / NANOSECONDS_PER_MICROSECOND
+def to_us(series: pd.Series, input_time_unit: str) -> pd.Series:
+    """Convert raw timestamp data to microseconds."""
+    converted: pd.Series = series.astype("float64")
+    if input_time_unit == "ns":
+        return converted / NANOSECONDS_PER_MICROSECOND
+    return converted
 
 
-def compute_metrics(trace: pd.DataFrame, target_cycle_us: float) -> pd.DataFrame:
+def compute_metrics(
+    trace: pd.DataFrame, target_cycle_us: float, input_time_unit: str
+) -> pd.DataFrame:
     """Derive analysis metrics from the raw trace."""
     metrics: pd.DataFrame = trace.copy()
 
-    metrics["op_duration_us"] = ns_to_us(
-        metrics["time_after_op_ns"] - metrics["time_at_begin_ns"]
+    metrics["op_duration_us"] = to_us(
+        metrics["time_after_op_ns"] - metrics["time_at_begin_ns"], input_time_unit
     )
-    metrics["write_latency_us"] = ns_to_us(
-        metrics["time_after_send_ns"] - metrics["time_after_op_ns"]
+    metrics["write_latency_us"] = to_us(
+        metrics["time_after_send_ns"] - metrics["time_after_op_ns"], input_time_unit
     )
-    metrics["read_latency_us"] = ns_to_us(
-        metrics["time_after_receive_ns"] - metrics["time_after_send_ns"]
+    metrics["read_latency_us"] = to_us(
+        metrics["time_after_receive_ns"] - metrics["time_after_send_ns"],
+        input_time_unit,
     )
-    metrics["end_to_end_latency_us"] = ns_to_us(
-        metrics["time_after_receive_ns"] - metrics["time_at_begin_ns"]
+    metrics["end_to_end_latency_us"] = to_us(
+        metrics["time_after_receive_ns"] - metrics["time_at_begin_ns"],
+        input_time_unit,
     )
-    metrics["cycle_duration_us"] = ns_to_us(metrics["time_at_begin_ns"].diff())
+    metrics["cycle_duration_us"] = to_us(
+        metrics["time_at_begin_ns"].diff(), input_time_unit
+    )
+    metrics["sleep_after_receive_us"] = to_us(
+        metrics["time_at_begin_ns"].shift(-1) - metrics["time_after_receive_ns"],
+        input_time_unit,
+    )
     metrics["jitter_us"] = metrics["cycle_duration_us"] - target_cycle_us
-    metrics["sleep_after_receive_us"] = ns_to_us(
-        metrics["time_at_begin_ns"].shift(-1) - metrics["time_after_receive_ns"]
-    )
     metrics["deadline_miss"] = metrics["end_to_end_latency_us"] > target_cycle_us
     metrics["negative_slack"] = metrics["sleep_after_receive_us"] <= 0.0
     metrics["transmission_gap"] = metrics["x_recv"] - metrics["x_trans"]
@@ -380,7 +401,9 @@ def run(config: AnalysisConfig) -> None:
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
     trace: pd.DataFrame = load_trace(config.input_csv)
-    metrics: pd.DataFrame = compute_metrics(trace, config.target_cycle_us)
+    metrics: pd.DataFrame = compute_metrics(
+        trace, config.target_cycle_us, config.input_time_unit
+    )
 
     plot_latency(metrics, config)
     plot_consistency(metrics, config)
